@@ -105,6 +105,7 @@ var (
 	ErrBroadcastDisabled         = &Error{msg: "broadcast socket option disabled"}
 	ErrNotPermitted              = &Error{msg: "operation not permitted"}
 	ErrAddressFamilyNotSupported = &Error{msg: "address family not supported by protocol"}
+	ErrPayloadGetFailed          = &Error{msg: "payload get failed"}
 )
 
 // Errors related to Subnet

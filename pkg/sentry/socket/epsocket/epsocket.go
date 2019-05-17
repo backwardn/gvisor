@@ -2026,28 +2026,22 @@ func (s *SocketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 		addr = &addrBuf
 	}
 
-	v := buffer.NewView(int(src.NumBytes()))
-
-	// Copy all the data into the buffer.
-	if _, err := src.CopyIn(t, v); err != nil {
-		return 0, syserr.FromError(err)
-	}
-
 	opts := tcpip.WriteOptions{
 		To:          addr,
 		More:        flags&linux.MSG_MORE != 0,
 		EndOfRecord: flags&linux.MSG_EOR != 0,
 	}
 
-	n, resCh, err := s.Endpoint.Write(tcpip.SlicePayload(v), opts)
+	v := userMemPayload{t, src}
+	n, resCh, err := s.Endpoint.Write(v, opts)
 	if resCh != nil {
 		if err := t.Block(resCh); err != nil {
 			return 0, syserr.FromError(err)
 		}
-		n, _, err = s.Endpoint.Write(tcpip.SlicePayload(v), opts)
+		n, _, err = s.Endpoint.Write(v, opts)
 	}
 	dontWait := flags&linux.MSG_DONTWAIT != 0
-	if err == nil && (n >= uintptr(len(v)) || dontWait) {
+	if err == nil && (n >= uintptr(v.Size()) || dontWait) {
 		// Complete write.
 		return int(n), nil
 	}
@@ -2061,18 +2055,18 @@ func (s *SocketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 	s.EventRegister(&e, waiter.EventOut)
 	defer s.EventUnregister(&e)
 
-	v.TrimFront(int(n))
+	v.DropFirst(int(n))
 	total := n
 	for {
-		n, _, err = s.Endpoint.Write(tcpip.SlicePayload(v), opts)
-		v.TrimFront(int(n))
+		n, _, err = s.Endpoint.Write(v, opts)
+		v.DropFirst(int(n))
 		total += n
 
 		if err != nil && err != tcpip.ErrWouldBlock && total == 0 {
 			return 0, syserr.TranslateNetstackError(err)
 		}
 
-		if err == nil && len(v) == 0 || err != nil && err != tcpip.ErrWouldBlock {
+		if err == nil && v.Size() == 0 || err != nil && err != tcpip.ErrWouldBlock {
 			return int(total), nil
 		}
 
@@ -2449,4 +2443,33 @@ func (s *SocketOperations) State() uint32 {
 // Type implements socket.Socket.Type.
 func (s *SocketOperations) Type() (family int, skType linux.SockType, protocol int) {
 	return s.family, s.skType, s.protocol
+}
+
+// userMemPayload implements Payload on top of slices for convenience.
+type userMemPayload struct {
+	t   *kernel.Task
+	src usermem.IOSequence
+}
+
+// Get implements Payload.
+func (u userMemPayload) Get(size int) ([]byte, *tcpip.Error) {
+	if size > u.Size() {
+		size = int(u.Size())
+	}
+	v := buffer.NewView(int(size))
+	srcCopy := u.src.TakeFirst(size)
+	if _, err := srcCopy.CopyIn(u.t, v); err != nil {
+		return nil, tcpip.ErrPayloadGetFailed
+	}
+	return v, nil
+}
+
+// Size implements Payload.
+func (u userMemPayload) Size() int {
+	return int(u.src.NumBytes())
+}
+
+// DropFirst drops the first n bytes from underlying src.
+func (u *userMemPayload) DropFirst(n int) {
+	u.src = u.src.DropFirst(int(n))
 }

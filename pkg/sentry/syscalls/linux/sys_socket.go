@@ -1049,10 +1049,12 @@ func sendSingleMsg(t *kernel.Task, s socket.Socket, file *fs.File, msgPtr userme
 	if err != nil {
 		return 0, err
 	}
-
-	controlMessages, err := control.Parse(t, s, controlData)
-	if err != nil {
-		return 0, err
+	var controlMessages transport.ControlMessages
+	if len(controlData) > 0 {
+		controlMessages, err = control.Parse(t, s, controlData)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	var haveDeadline bool

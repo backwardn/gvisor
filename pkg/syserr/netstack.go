@@ -87,6 +87,7 @@ var netstackErrorTranslations = map[*tcpip.Error]*Error{
 	tcpip.ErrBroadcastDisabled:         ErrBroadcastDisabled,
 	tcpip.ErrNotPermitted:              ErrNotPermittedNet,
 	tcpip.ErrAddressFamilyNotSupported: ErrAddressFamilyNotSupported,
+	tcpip.ErrPayloadGetFailed:          ErrBadAddress,
 }
 
 // TranslateNetstackError converts an error from the tcpip package to a sentry

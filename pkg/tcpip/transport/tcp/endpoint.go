@@ -117,6 +117,7 @@ const (
 	notifyMTUChanged
 	notifyDrain
 	notifyReset
+	notifyResetByPeer
 	notifyKeepaliveChanged
 	notifyMSSChanged
 )
@@ -784,8 +785,56 @@ func (e *endpoint) Write(p tcpip.Payload, opts tcpip.WriteOptions) (uintptr, <-c
 	// and opts.EndOfRecord are also ignored.
 
 	e.mu.RLock()
+
+	// The endpoint cannot be written to if it's not connected.
+	if !e.state.connected() {
+		switch e.state {
+		case StateError:
+			e.mu.RUnlock()
+			return 0, nil, e.hardError
+		default:
+			e.mu.RUnlock()
+			return 0, nil, tcpip.ErrClosedForSend
+		}
+	}
+
+	// Nothing to do if the buffer is empty.
+	if p.Size() == 0 {
+		e.mu.RUnlock()
+		return 0, nil, nil
+	}
+
+	e.sndBufMu.Lock()
+
+	// Check if the connection has already been closed for sends.
+	if e.sndClosed {
+		e.sndBufMu.Unlock()
+		e.mu.RUnlock()
+		return 0, nil, tcpip.ErrClosedForSend
+	}
+
+	// Check against the limit.
+	avail := e.sndBufSize - e.sndBufUsed
+	e.sndBufMu.Unlock()
+	e.mu.RUnlock()
+	if avail <= 0 {
+		return 0, nil, tcpip.ErrWouldBlock
+	}
+
+	// Copy in memory without holding sndBufMu so that worker goroutine can
+	// make progress independent of this operation.
+	v, perr := p.Get(avail)
+	if perr != nil {
+		return 0, nil, perr
+	}
+
+	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	// Because we released the lock before copying, check state again
+	// to make sure the endpoint is still in a valid state for a
+	// write.
+	//
 	// The endpoint cannot be written to if it's not connected.
 	if !e.state.connected() {
 		switch e.state {
@@ -796,36 +845,11 @@ func (e *endpoint) Write(p tcpip.Payload, opts tcpip.WriteOptions) (uintptr, <-c
 		}
 	}
 
-	// Nothing to do if the buffer is empty.
-	if p.Size() == 0 {
-		return 0, nil, nil
-	}
-
-	e.sndBufMu.Lock()
-
-	// Check if the connection has already been closed for sends.
-	if e.sndClosed {
-		e.sndBufMu.Unlock()
-		return 0, nil, tcpip.ErrClosedForSend
-	}
-
-	// Check against the limit.
-	avail := e.sndBufSize - e.sndBufUsed
-	if avail <= 0 {
-		e.sndBufMu.Unlock()
-		return 0, nil, tcpip.ErrWouldBlock
-	}
-
-	v, perr := p.Get(avail)
-	if perr != nil {
-		e.sndBufMu.Unlock()
-		return 0, nil, perr
-	}
-
 	l := len(v)
 	s := newSegmentFromView(&e.route, e.id, v)
 
 	// Add data to the send queue.
+	e.sndBufMu.Lock()
 	e.sndBufUsed += l
 	e.sndBufInQueue += seqnum.Size(l)
 	e.sndQueue.PushBack(s)
@@ -1620,8 +1644,10 @@ func (e *endpoint) Listen(backlog int) (err *tcpip.Error) {
 // startAcceptedLoop sets up required state and starts a goroutine with the
 // main loop for accepted connections.
 func (e *endpoint) startAcceptedLoop(waiterQueue *waiter.Queue) {
+	e.mu.Lock()
 	e.waiterQueue = waiterQueue
 	e.workerRunning = true
+	e.mu.Unlock()
 	go e.protocolMainLoop(false) // S/R-SAFE: drained on save.
 }
 
@@ -1751,34 +1777,10 @@ func (e *endpoint) GetRemoteAddress() (tcpip.FullAddress, *tcpip.Error) {
 // HandlePacket is called by the stack when new packets arrive to this transport
 // endpoint.
 func (e *endpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, vv buffer.VectorisedView) {
-	s := newSegment(r, id, vv)
-	if !s.parse() {
-		e.stack.Stats().MalformedRcvdPackets.Increment()
-		e.stack.Stats().TCP.InvalidSegmentsReceived.Increment()
-		s.decRef()
-		return
-	}
-
-	if !s.csumValid {
-		e.stack.Stats().MalformedRcvdPackets.Increment()
-		e.stack.Stats().TCP.ChecksumErrors.Increment()
-		s.decRef()
-		return
-	}
-
-	e.stack.Stats().TCP.ValidSegmentsReceived.Increment()
-	if (s.flags & header.TCPFlagRst) != 0 {
-		e.stack.Stats().TCP.ResetsReceived.Increment()
-	}
-
-	// Send packet to worker goroutine.
-	if e.segmentQueue.enqueue(s) {
-		e.newSegmentWaker.Assert()
-	} else {
-		// The queue is full, so we drop the segment.
-		e.stack.Stats().DroppedPackets.Increment()
-		s.decRef()
-	}
+	// TCP HandlePacket is not required anymore as inbound packets first
+	// land at the Dispatcher which then can either delivery using the
+	// worker go routine or directly do the invoke the tcp processing inline
+	// based on the state of the endpoint.
 }
 
 // HandleControlPacket implements stack.TransportEndpoint.HandleControlPacket.
