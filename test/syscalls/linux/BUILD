@@ -2136,6 +2136,26 @@ cc_library(
     alwayslink = 1,
 )
 
+cc_library(
+    name = "socket_bind_to_device_test_cases",
+    testonly = 1,
+    srcs = [
+        "socket_bind_to_device.cc",
+    ],
+    hdrs = [
+        "socket_bind_to_device.h",
+    ],
+    deps = [
+        ":ip_socket_test_util",
+        ":socket_test_util",
+        "//test/util:test_util",
+        "//test/util:thread_util",
+        "//test/util:uid_util",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = 1,
+)
+
 cc_binary(
     name = "socket_abstract_test",
     testonly = 1,
@@ -2343,6 +2363,23 @@ cc_binary(
         ":socket_test_util",
         "//test/util:test_main",
         "//test/util:test_util",
+    ],
+)
+
+cc_binary(
+    name = "socket_bind_to_device_test",
+    testonly = 1,
+    srcs = [
+        "socket_bind_to_device_test.cc",
+    ],
+    linkstatic = 1,
+    deps = [
+        ":ip_socket_test_util",
+        ":socket_bind_to_device_test_cases",
+        ":socket_test_util",
+        "//test/util:test_main",
+        "//test/util:test_util",
+        "//test/util:thread_util",
     ],
 )
 
@@ -3135,6 +3172,7 @@ cc_binary(
         "//test/util:test_main",
         "//test/util:test_util",
         "//test/util:thread_util",
+        "//test/util:uid_util",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest",
     ],
