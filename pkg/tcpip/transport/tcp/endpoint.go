@@ -878,6 +878,24 @@ func (e *endpoint) readLocked() (buffer.View, *tcpip.Error) {
 	return v, nil
 }
 
+// isEndpointWritableLocked returns true if the endpoint can be
+// written to, otherwise it returns false an error value describing
+// the reason why it's not writable.
+// Caller must hold e.mu and e.sndBufMu
+func (e *endpoint) isEndpointWritableLocked() (bool, *tcpip.Error) {
+	// The endpoint cannot be written to if it's not connected.
+	if e.state.connected() {
+		return true, nil
+	}
+
+	switch e.state {
+	case StateError:
+		return false, e.hardError
+	default:
+		return false, tcpip.ErrClosedForSend
+	}
+}
+
 // Write writes data to the endpoint's peer.
 func (e *endpoint) Write(p tcpip.Payload, opts tcpip.WriteOptions) (uintptr, <-chan struct{}, *tcpip.Error) {
 	// Linux completely ignores any address passed to sendto(2) for TCP sockets
@@ -885,48 +903,67 @@ func (e *endpoint) Write(p tcpip.Payload, opts tcpip.WriteOptions) (uintptr, <-c
 	// and opts.EndOfRecord are also ignored.
 
 	e.mu.RLock()
-	defer e.mu.RUnlock()
+	e.sndBufMu.Lock()
 
-	// The endpoint cannot be written to if it's not connected.
-	if !e.state.connected() {
-		switch e.state {
-		case StateError:
-			return 0, nil, e.hardError
-		default:
-			return 0, nil, tcpip.ErrClosedForSend
-		}
+	if writable, err := e.isEndpointWritableLocked(); !writable {
+		e.sndBufMu.Unlock()
+		e.mu.RUnlock()
+		return 0, nil, err
 	}
 
 	// Nothing to do if the buffer is empty.
 	if p.Size() == 0 {
+		e.sndBufMu.Unlock()
+		e.mu.RUnlock()
 		return 0, nil, nil
 	}
 
-	e.sndBufMu.Lock()
-
-	// Check if the connection has already been closed for sends.
-	if e.sndClosed {
-		e.sndBufMu.Unlock()
-		return 0, nil, tcpip.ErrClosedForSend
-	}
+	// get available buffer space.
+	avail := e.sndBufSize - e.sndBufUsed
+	e.sndBufMu.Unlock()
+	e.mu.RUnlock()
 
 	// Check against the limit.
-	avail := e.sndBufSize - e.sndBufUsed
+	if avail <= 0 {
+		return 0, nil, tcpip.ErrWouldBlock
+	}
+
+	// Copy in memory without holding sndBufMu so that worker goroutine can
+	// make progress independent of this operation.
+	v, perr := p.Get(avail)
+	if perr != nil {
+		return 0, nil, perr
+	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	e.sndBufMu.Lock()
+
+	// Because we released the lock before copying, check state again
+	// to make sure the endpoint is still in a valid state for a
+	// write.
+	if writable, err := e.isEndpointWritableLocked(); !writable {
+		e.sndBufMu.Unlock()
+		return 0, nil, err
+	}
+
+	// get available buffer space.
+	avail = e.sndBufSize - e.sndBufUsed
+	// Check against the limit.
 	if avail <= 0 {
 		e.sndBufMu.Unlock()
 		return 0, nil, tcpip.ErrWouldBlock
 	}
 
-	v, perr := p.Get(avail)
-	if perr != nil {
-		e.sndBufMu.Unlock()
-		return 0, nil, perr
+	// Discard any excess data copied in due to avail being reduced due to a
+	// simultaneous write call to the socket.
+	if avail < len(v) {
+		v = v[:avail]
 	}
 
+	// Add data to the send queue.
 	l := len(v)
 	s := newSegmentFromView(&e.route, e.id, v)
-
-	// Add data to the send queue.
 	e.sndBufUsed += l
 	e.sndBufInQueue += seqnum.Size(l)
 	e.sndQueue.PushBack(s)
@@ -1640,7 +1677,9 @@ func (e *endpoint) Shutdown(flags tcpip.ShutdownFlags) *tcpip.Error {
 			e.sndQueue.PushBack(s)
 			e.sndBufInQueue++
 
-			// Mark endpoint as closed.
+			// Mark endpoint as closed and update state to reflect
+			// that socket is transitioned out of established state.
+			e.state = StateFinWait1
 			e.sndClosed = true
 
 			e.sndBufMu.Unlock()

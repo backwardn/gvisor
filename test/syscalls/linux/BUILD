@@ -1252,6 +1252,7 @@ cc_binary(
     srcs = ["partial_bad_buffer.cc"],
     linkstatic = 1,
     deps = [
+        "//test/util:file_descriptor",
         "//test/util:fs_util",
         "//test/util:temp_path",
         "//test/util:test_main",

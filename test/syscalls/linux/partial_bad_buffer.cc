@@ -14,12 +14,16 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
 #include "gtest/gtest.h"
+#include "test/util/file_descriptor.h"
 #include "test/util/fs_util.h"
 #include "test/util/temp_path.h"
 #include "test/util/test_util.h"
@@ -297,6 +301,114 @@ TEST_F(PartialBadBufferTest, WriteEfaultIsntPartial) {
 
   // 'A' has not been written.
   EXPECT_STREQ(buf, kMessage);
+}
+
+PosixErrorOr<sockaddr_storage> InetLoopbackAddr(int family) {
+  struct sockaddr_storage addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.ss_family = family;
+  switch (family) {
+    case AF_INET:
+      reinterpret_cast<struct sockaddr_in*>(&addr)->sin_addr.s_addr =
+          htonl(INADDR_LOOPBACK);
+      break;
+    case AF_INET6:
+      reinterpret_cast<struct sockaddr_in6*>(&addr)->sin6_addr =
+          in6addr_loopback;
+      break;
+    default:
+      return PosixError(EINVAL,
+                        absl::StrCat("unknown socket family: ", family));
+  }
+  return addr;
+}
+
+// SendMsgTCP verifies that calling sendmsg with a bad address returns an
+// EFAULT. It also verifies that passing a buffer which is made up of 2
+// pages one valid and one guard page succeeds as long as the write is
+// for exactly the size of 1 page.
+TEST_F(PartialBadBufferTest, SendMsgTCP) {
+  int snd_sock_fd = -1;
+  int rcv_sock_fd = -1;
+  int listen_socket = -1;
+  ASSERT_THAT(listen_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP),
+              SyscallSucceeds());
+
+  ASSERT_THAT(snd_sock_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP),
+              SyscallSucceeds());
+
+  // Initialize address to the loopback one.
+  sockaddr_storage addr = ASSERT_NO_ERRNO_AND_VALUE(InetLoopbackAddr(AF_INET));
+  socklen_t addrlen = sizeof(addr);
+
+  // Bind to some port then start listening.
+  ASSERT_THAT(
+      bind(listen_socket, reinterpret_cast<struct sockaddr*>(&addr), addrlen),
+      SyscallSucceeds());
+
+  ASSERT_THAT(listen(listen_socket, SOMAXCONN), SyscallSucceeds());
+
+  // Get the address we're listening on, then connect to it. We need to do this
+  // because we're allowing the stack to pick a port for us.
+  ASSERT_THAT(getsockname(listen_socket,
+                          reinterpret_cast<struct sockaddr*>(&addr), &addrlen),
+              SyscallSucceeds());
+
+  ASSERT_THAT(
+      RetryEINTR(connect)(snd_sock_fd,
+                          reinterpret_cast<struct sockaddr*>(&addr), addrlen),
+      SyscallSucceeds());
+
+  // Accept the connection.
+  ASSERT_THAT(rcv_sock_fd = RetryEINTR(accept)(listen_socket, nullptr, nullptr),
+              SyscallSucceeds());
+
+  // TODO(gvisor.dev/issue/674): Update this once Netstack matches linux
+  //   behaviour on a setsockopt of SO_RCVBUF/SO_SNDBUF.
+  //
+  // Set SO_SNDBUF for socket to exactly kPageSize+1.
+  //
+  // gVisor does not double the value passed in SO_SNDBUF like linux does so we
+  // just increase it by 1 byte here for gVisor so that we can test writing 1
+  // byte past the valid page and check that it triggers an EFAULT
+  // correctly. Otherwise in gVisor the sendmsg call will just return with no
+  // error with kPageSize bytes written successfully.
+  uint32_t buf_size = kPageSize + 1;
+  ASSERT_THAT(setsockopt(snd_sock_fd, SOL_SOCKET, SO_SNDBUF, &buf_size,
+                         sizeof(buf_size)),
+              SyscallSucceedsWithValue(0));
+
+  buf_size = -1;
+  socklen_t opt_len = sizeof(buf_size);
+  ASSERT_THAT(
+      getsockopt(snd_sock_fd, SOL_SOCKET, SO_SNDBUF, &buf_size, &opt_len),
+      SyscallSucceedsWithValue(0));
+
+  FileDescriptor send_socket(snd_sock_fd), recv_socket(rcv_sock_fd);
+
+  struct msghdr hdr = {};
+  struct iovec iov = {};
+  iov.iov_base = bad_buffer_;
+  iov.iov_len = kPageSize;
+  hdr.msg_iov = &iov;
+  hdr.msg_iovlen = 1;
+
+  ASSERT_THAT(RetryEINTR(sendmsg)(send_socket.get(), &hdr, 0),
+              SyscallFailsWithErrno(EFAULT));
+
+  // Now assert that writing kPageSize from addr_ succeeds.
+  iov.iov_base = addr_;
+  ASSERT_THAT(RetryEINTR(sendmsg)(send_socket.get(), &hdr, 0),
+              SyscallSucceedsWithValue(kPageSize));
+  // Read the data out so that we drain the socket SND_BUF on the sender.
+  std::vector<char> buffer(kPageSize);
+  ASSERT_THAT(RetryEINTR(read)(recv_socket.get(), buffer.data(), kPageSize),
+              SyscallSucceedsWithValue(kPageSize));
+
+  // Now assert that writing > kPageSize results in EFAULT.
+  iov.iov_len = kPageSize + 1;
+  ASSERT_THAT(RetryEINTR(sendmsg)(send_socket.get(), &hdr, 0),
+              SyscallFailsWithErrno(EFAULT));
 }
 
 }  // namespace
