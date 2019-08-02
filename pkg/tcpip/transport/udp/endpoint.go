@@ -248,7 +248,13 @@ func (e *endpoint) prepareForWrite(to *tcpip.FullAddress) (retry bool, err *tcpi
 // configured multicast interface if no interface is specified and the
 // specified address is a multicast address.
 func (e *endpoint) connectRoute(nicid tcpip.NICID, addr tcpip.FullAddress, netProto tcpip.NetworkProtocolNumber) (stack.Route, tcpip.NICID, *tcpip.Error) {
+	// If we are bound to a non-unicast address (multicast or broadcast), don't
+	// use that as the localAddr for the route.
 	localAddr := e.id.LocalAddress
+	if isBroadcastOrMulticast(localAddr) {
+		localAddr = ""
+	}
+
 	if header.IsV4MulticastAddress(addr.Addr) || header.IsV6MulticastAddress(addr.Addr) {
 		if nicid == 0 {
 			nicid = e.multicastNICID
@@ -448,7 +454,7 @@ func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
 		}
 
 		nicID := v.NIC
-		if v.InterfaceAddr == header.IPv4Any {
+		if len(v.InterfaceAddr) == 0 || v.InterfaceAddr == header.IPv4Any {
 			if nicID == 0 {
 				r, err := e.stack.FindRoute(0, "", v.MulticastAddr, header.IPv4ProtocolNumber, false /* multicastLoop */)
 				if err == nil {
@@ -916,8 +922,8 @@ func (e *endpoint) bindLocked(addr tcpip.FullAddress) *tcpip.Error {
 	}
 
 	nicid := addr.NIC
-	if len(addr.Addr) != 0 {
-		// A local address was specified, verify that it's valid.
+	if len(addr.Addr) != 0 && !isBroadcastOrMulticast(addr.Addr) {
+		// A local unicast address was specified, verify that it's valid.
 		nicid = e.stack.CheckLocalAddress(addr.NIC, netProto, addr.Addr)
 		if nicid == 0 {
 			return tcpip.ErrBadLocalAddress
@@ -1065,4 +1071,8 @@ func (e *endpoint) HandleControlPacket(id stack.TransportEndpointID, typ stack.C
 func (e *endpoint) State() uint32 {
 	// TODO(b/112063468): Translate internal state to values returned by Linux.
 	return 0
+}
+
+func isBroadcastOrMulticast(a tcpip.Address) bool {
+	return a == header.IPv4Broadcast || header.IsV4MulticastAddress(a) || header.IsV6MulticastAddress(a)
 }
