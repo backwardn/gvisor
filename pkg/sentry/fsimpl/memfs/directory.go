@@ -130,28 +130,37 @@ func (fd *directoryFD) IterDirents(ctx context.Context, cb vfs.IterDirentsCallba
 
 // Seek implements vfs.FileDescriptionImpl.Seek.
 func (fd *directoryFD) Seek(ctx context.Context, offset int64, whence int32) (int64, error) {
-	if whence != linux.SEEK_SET {
-		// TODO: Linux also allows SEEK_CUR.
+	fs := fd.filesystem()
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	switch whence {
+	case linux.SEEK_SET:
+		// Use offset as given.
+	case linux.SEEK_CUR:
+		offset += fd.off
+	default:
 		return 0, syserror.EINVAL
 	}
 	if offset < 0 {
 		return 0, syserror.EINVAL
 	}
 
+	// If the offset isn't changing (e.g. due to lseek(0, SEEK_CUR)), don't
+	// seek even if doing so might reposition the iterator due to concurrent
+	// mutation of the directory. Compare fs/libfs.c:dcache_dir_lseek().
+	if fd.off == offset {
+		return offset, nil
+	}
+
 	fd.off = offset
 	// Compensate for "." and "..".
-	var remChildren int64
-	if offset < 2 {
-		remChildren = 0
-	} else {
+	remChildren := int64(0)
+	if offset >= 2 {
 		remChildren = offset - 2
 	}
 
-	fs := fd.filesystem()
 	dir := fd.inode().impl.(*directory)
-
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
 
 	// Ensure that fd.iter exists and is not linked into dir.childList.
 	if fd.iter == nil {

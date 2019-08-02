@@ -269,7 +269,6 @@ func (fs *Filesystem) OpenAt(ctx context.Context, rp *vfs.ResolvingPath, opts vf
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	if rp.Done() {
-		// FIXME: ???
 		if rp.MustBeDir() {
 			return nil, syserror.EISDIR
 		}
@@ -402,7 +401,6 @@ func (fs *Filesystem) ReadlinkAt(ctx context.Context, rp *vfs.ResolvingPath) (st
 // RenameAt implements vfs.FilesystemImpl.RenameAt.
 func (fs *Filesystem) RenameAt(ctx context.Context, rp *vfs.ResolvingPath, vd vfs.VirtualDentry, opts vfs.RenameOptions) error {
 	if rp.Done() {
-		// FIXME
 		return syserror.ENOENT
 	}
 	fs.mu.Lock()
@@ -447,6 +445,8 @@ func (fs *Filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error 
 	if err := rp.VirtualFilesystem().DeleteDentry(vfs.MountNamespaceFromContext(ctx), vfsd); err != nil {
 		return err
 	}
+	// Remove from parent directory's childList.
+	vfsd.Parent().Impl().(*Dentry).inode.impl.(*directory).childList.Remove(vfsd.Impl().(*Dentry))
 	inode.decRef()
 	return nil
 }
@@ -537,6 +537,8 @@ func (fs *Filesystem) UnlinkAt(ctx context.Context, rp *vfs.ResolvingPath) error
 	if err := rp.VirtualFilesystem().DeleteDentry(vfs.MountNamespaceFromContext(ctx), vfsd); err != nil {
 		return err
 	}
+	// Remove from parent directory's childList.
+	vfsd.Parent().Impl().(*Dentry).inode.impl.(*directory).childList.Remove(vfsd.Impl().(*Dentry))
 	inode.decLinksLocked()
 	return nil
 }
