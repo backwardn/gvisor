@@ -14,7 +14,9 @@
 
 package linux
 
-import "gvisor.dev/gvisor/pkg/binary"
+import (
+	"gvisor.dev/gvisor/pkg/binary"
+)
 
 // Address families, from linux/socket.h.
 const (
@@ -267,6 +269,96 @@ type SockAddrUnix struct {
 	Path   [UnixPathMax]int8
 }
 
+// SockAddr represents a union of valid socket address types. This is logically
+// equivalent to struct sockaddr.
+type SockAddr interface {
+	Inet() *SockAddrInet
+	Inet6() *SockAddrInet6
+	Unix() *SockAddrUnix
+	Netlink() *SockAddrNetlink
+}
+
+// Inet implements SockAddr.Inet.
+func (s *SockAddrInet) Inet() *SockAddrInet {
+	return s
+}
+
+// Inet6 implements SockAddr.Inet6.
+func (*SockAddrInet) Inet6() *SockAddrInet6 {
+	return nil
+}
+
+// Unix implements SockAddr.Unix.
+func (*SockAddrInet) Unix() *SockAddrUnix {
+	return nil
+}
+
+// Netlink implements SockAddr.Netlink.
+func (*SockAddrInet) Netlink() *SockAddrNetlink {
+	return nil
+}
+
+// Inet implements SockAddr.Inet.
+func (*SockAddrInet6) Inet() *SockAddrInet {
+	return nil
+}
+
+// Inet6 implements SockAddr.Inet6.
+func (s *SockAddrInet6) Inet6() *SockAddrInet6 {
+	return s
+}
+
+// Unix implements SockAddr.Unix.
+func (*SockAddrInet6) Unix() *SockAddrUnix {
+	return nil
+}
+
+// Netlink implements SockAddr.Netlink.
+func (*SockAddrInet6) Netlink() *SockAddrNetlink {
+	return nil
+}
+
+// Inet implements SockAddr.Inet.
+func (*SockAddrUnix) Inet() *SockAddrInet {
+	return nil
+}
+
+// Inet6 implements SockAddr.Inet6.
+func (*SockAddrUnix) Inet6() *SockAddrInet6 {
+	return nil
+}
+
+// Unix implements SockAddr.Unix.
+func (s *SockAddrUnix) Unix() *SockAddrUnix {
+	return s
+}
+
+// Netlink implements SockAddr.Netlink.
+func (*SockAddrUnix) Netlink() *SockAddrNetlink {
+	return nil
+}
+
+// Inet implements SockAddr.Inet.
+func (*SockAddrNetlink) Inet() *SockAddrInet {
+	return nil
+}
+
+// Inet6 implements SockAddr.Inet6.
+func (*SockAddrNetlink) Inet6() *SockAddrInet6 {
+
+	return nil
+}
+
+// Unix implements SockAddr.Unix.
+func (*SockAddrNetlink) Unix() *SockAddrUnix {
+	return nil
+}
+
+// Netlink implements SockAddr.Netlink.
+func (s *SockAddrNetlink) Netlink() *SockAddrNetlink {
+	return s
+}
+
 // Linger is struct linger, from include/linux/socket.h.
 type Linger struct {
 	OnOff  int32
@@ -352,7 +444,7 @@ type TCPInfo struct {
 }
 
 // SizeOfTCPInfo is the binary size of a TCPInfo struct.
-const SizeOfTCPInfo = 104
+var SizeOfTCPInfo = int(binary.Size(TCPInfo{}))
 
 // Control message types, from linux/socket.h.
 const (
