@@ -23,6 +23,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -189,6 +190,8 @@ func runTestCaseRunsc(testBin string, tc gtest.TestCase, t *testing.T) {
 		"-log-format=text",
 		"-TESTONLY-unsafe-nonroot=true",
 		"-net-raw=true",
+		fmt.Sprintf("-panic-signal=%d", syscall.SIGTERM),
+		"-watchdog-action=panic",
 	}
 	if *overlay {
 		args = append(args, "-overlay")
@@ -220,8 +223,8 @@ func runTestCaseRunsc(testBin string, tc gtest.TestCase, t *testing.T) {
 
 	// Current process doesn't have CAP_SYS_ADMIN, create user namespace and run
 	// as root inside that namespace to get it.
-	args = append(args, "run", "--bundle", bundleDir, id)
-	cmd := exec.Command(*runscPath, args...)
+	rargs := append(args, "run", "--bundle", bundleDir, id)
+	cmd := exec.Command(*runscPath, rargs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
 		// Set current user/group as root inside the namespace.
@@ -239,9 +242,32 @@ func runTestCaseRunsc(testBin string, tc gtest.TestCase, t *testing.T) {
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM)
+	go func() {
+		s, ok := <-sig
+		if !ok {
+			return
+		}
+		t.Logf("Got signal: %v", s)
+		dargs := append(args, "-alsologtostderr=true", "debug", "--stacks", id)
+		cmd := exec.Command(*runscPath, dargs...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+
+		dargs = append(args, "debug",
+			fmt.Sprintf("--signal=%d", syscall.SIGTERM),
+			id)
+		cmd = exec.Command(*runscPath, dargs...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+	}()
 	if err = cmd.Run(); err != nil {
 		t.Errorf("test %q exited with status %v, want 0", tc.FullName(), err)
 	}
+	close(sig)
 }
 
 // filterEnv returns an environment with the blacklisted variables removed.
